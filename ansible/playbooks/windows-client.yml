@@ -1,0 +1,27 @@
+- name: Joindre un client Windows au domaine Samba AD
+  hosts: windows-client
+  vars:
+    domain_name: "example.local"
+    domain_realm: "EXAMPLE.LOCAL"
+    ad_dc_hostname: "dc1.example.local"
+    domain_admin_user: "Administrator"
+    domain_admin_password: "P@ssw0rd123"
+
+  tasks:
+    - name: Définir le nom complet du domaine
+      win_hostname:
+        name: windows-client
+
+    - name: Joindre le domaine
+      win_domain_membership:
+        dns_domain_name: "{{ domain_name }}"
+        domain_admin_user: "{{ domain_admin_user }}"
+        domain_admin_password: "{{ domain_admin_password }}"
+        state: domain
+        hostname: windows-client
+      register: domain_join
+
+    - name: Redémarrer l'hôte s'il a été joint
+      win_reboot:
+        msg: "Reboot après jonction au domaine"
+      when: domain_join.reboot_required
