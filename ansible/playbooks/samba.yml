@@ -1,0 +1,132 @@
+---
+- name: Installation d'un Contrôleur de Domaine Active Directory avec Samba
+  hosts: dc
+  become: true
+
+  vars:
+    hostname_fqdn: "dc1.example.local"
+    domain_realm: "EXAMPLE.LOCAL"
+    netbios_name: "EXAMPLE"
+    samba_domain: "example.local"
+    samba_admin_password: "P@ssw0rd123"
+    interface_name: "eth1"  # Adapter selon Vagrant
+    dns_forwarder: "8.8.8.8"
+
+  tasks:
+
+    - name: Mise à jour du système et installation des paquets requis
+      apt:
+        name:
+          - samba
+          - smbclient
+          - krb5-user
+          - winbind
+          - libnss-winbind
+          - libpam-winbind
+          - libpam-krb5
+          - acl
+          - attr
+        update_cache: true
+        state: present
+
+    - name: Définir le hostname FQDN
+      hostname:
+        name: "{{ hostname_fqdn }}"
+
+    - name: Ajouter au fichier /etc/hosts
+      lineinfile:
+        path: /etc/hosts
+        line: "192.168.56.10 {{ hostname_fqdn }} dc1"
+        state: present
+
+    - name: Arrêter les services Samba préexistants
+      service:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - smbd
+        - nmbd
+        - winbind
+      ignore_errors: yes
+
+    - name: Renommer l'ancien smb.conf s'il existe
+      command: mv /etc/samba/smb.conf /etc/samba/smb.conf.old
+      args:
+        removes: /etc/samba/smb.conf
+      ignore_errors: yes
+
+    - name: Provisionner le domaine Active Directory Samba
+      command: >
+        samba-tool domain provision
+        --use-rfc2307
+        --realm={{ domain_realm }}
+        --domain={{ netbios_name }}
+        --server-role=dc
+        --dns-backend=SAMBA_INTERNAL
+        --adminpass={{ samba_admin_password }}
+      args:
+        creates: /var/lib/samba/private/sam.ldb
+
+    - name: Désactiver systemd-resolved si actif
+      service:
+        name: systemd-resolved
+        state: stopped
+        enabled: no
+      ignore_errors: yes
+
+    - name: Forcer /etc/resolv.conf pour pointer vers 127.0.0.1
+      copy:
+        dest: /etc/resolv.conf
+        content: |
+          search {{ samba_domain }}
+          nameserver 127.0.0.1
+      force: yes
+
+    - name: Rendre resolv.conf immuable
+      command: chattr +i /etc/resolv.conf
+      args:
+        warn: false
+      ignore_errors: yes
+
+    - name: Remplacer krb5.conf avec le fichier Samba généré
+      copy:
+        src: /var/lib/samba/private/krb5.conf
+        dest: /etc/krb5.conf
+        remote_src: yes
+        force: yes
+
+    - name: Activer NTP via Chrony
+      apt:
+        name: chrony
+        state: present
+
+    - name: Configurer chrony.conf
+      blockinfile:
+        path: /etc/chrony/chrony.conf
+        marker: "# {mark} ANSIBLE MANAGED BLOCK"
+        block: |
+          server 0.pool.ntp.org iburst
+          server 1.pool.ntp.org iburst
+          allow 192.168.0.0/16
+
+    - name: Redémarrer Chrony
+      service:
+        name: chrony
+        state: restarted
+        enabled: yes
+
+    - name: Démasquer et activer samba-ad-dc
+      systemd:
+        name: samba-ad-dc
+        enabled: yes
+        state: started
+        masked: no
+
+    - name: Test de connectivité avec smbclient (facultatif)
+      shell: smbclient -L localhost -N
+      register: smbclient_result
+      ignore_errors: yes
+
+    - name: Afficher résultat smbclient
+      debug:
+        var: smbclient_result.stdout_lines

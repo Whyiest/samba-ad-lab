@@ -1,0 +1,122 @@
+---
+- name: Joindre un client Linux au domaine Samba AD avec Winbind
+  hosts: linux-client
+  become: true
+
+  vars:
+    domain_name: "example.local"
+    domain_realm: "EXAMPLE.LOCAL"
+    netbios_name: "EXAMPLE"
+    ad_dc_ip: "192.168.56.10"
+    ad_dc_hostname: "dc1.example.local"
+    domain_admin_user: "Administrator"
+    domain_admin_password: "P@ssw0rd123"
+    interface_name: "eth1"  # Adapter si nécessaire
+
+  tasks:
+    - name: Installer les paquets requis pour Winbind
+      apt:
+        name:
+          - samba
+          - krb5-user
+          - winbind
+          - libnss-winbind
+          - libpam-winbind
+          - libpam-krb5
+        update_cache: true
+        state: present
+
+    - name: Définir le fichier /etc/hosts
+      lineinfile:
+        path: /etc/hosts
+        line: "{{ ad_dc_ip }} {{ ad_dc_hostname }} dc1"
+        state: present
+
+    - name: Forcer resolv.conf à pointer vers le DC Samba
+      copy:
+        dest: /etc/resolv.conf
+        content: |
+          search {{ domain_name }}
+          nameserver {{ ad_dc_ip }}
+        force: yes
+
+    - name: Créer le fichier /etc/krb5.conf
+      copy:
+        dest: /etc/krb5.conf
+        content: |
+          [libdefaults]
+              default_realm = {{ domain_realm }}
+              dns_lookup_realm = false
+              dns_lookup_kdc = true
+
+          [realms]
+              {{ domain_realm }} = {
+                  kdc = {{ ad_dc_hostname }}
+                  admin_server = {{ ad_dc_hostname }}
+              }
+
+          [domain_realm]
+              .{{ domain_name }} = {{ domain_realm }}
+              {{ domain_name }} = {{ domain_realm }}
+
+    - name: Créer le fichier /etc/samba/smb.conf
+      copy:
+        dest: /etc/samba/smb.conf
+        content: |
+          [global]
+              netbios name = LINUXCLIENT
+              workgroup = {{ netbios_name }}
+              security = ADS
+              realm = {{ domain_realm }}
+
+              winbind use default domain = true
+              winbind enum users = yes
+              winbind enum groups = yes
+              winbind refresh tickets = yes
+              template shell = /bin/bash
+              template homedir = /home/%U
+              idmap config * : backend = tdb
+              idmap config * : range = 3000-7999
+              idmap config {{ netbios_name }} : backend = rid
+              idmap config {{ netbios_name }} : range = 10000-999999
+
+    - name: Mettre à jour nsswitch.conf pour Winbind
+      lineinfile:
+        path: /etc/nsswitch.conf
+        regexp: '^passwd:'
+        line: 'passwd:         compat winbind'
+
+    - name: Ajouter winbind aux groupes système dans nsswitch.conf
+      lineinfile:
+        path: /etc/nsswitch.conf
+        regexp: '^group:'
+        line: 'group:          compat winbind'
+
+    - name: Joindre le domaine avec net ads join
+      shell: |
+        echo '{{ domain_admin_password }}' | net ads join -U {{ domain_admin_user }}%{{ domain_admin_password }}
+      args:
+        creates: /etc/samba/joined
+
+    - name: Créer un fichier témoin pour éviter les doubles joins
+      file:
+        path: /etc/samba/joined
+        state: touch
+
+    - name: Redémarrer les services nécessaires
+      service:
+        name: "{{ item }}"
+        state: restarted
+      loop:
+        - smbd
+        - winbind
+        - nmbd
+
+    - name: Vérifier l'intégration - wbinfo -u
+      command: wbinfo -u
+      register: wbinfo_users
+      changed_when: false
+
+    - name: Afficher les utilisateurs du domaine
+      debug:
+        var: wbinfo_users.stdout_lines

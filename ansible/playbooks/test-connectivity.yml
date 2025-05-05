@@ -1,0 +1,21 @@
+---
+- name: Test de connectivité - DC
+  hosts: dc
+  gather_facts: false
+  tasks:
+    - name: Ping DC
+      ping:
+
+- name: Test de connectivité - Linux client
+  hosts: linux-client
+  gather_facts: false
+  tasks:
+    - name: Ping Linux client
+      ping:
+
+- name: Test de connectivité - Windows client
+  hosts: windows-client
+  gather_facts: false
+  tasks:
+    - name: Ping Windows client
+      win_ping:

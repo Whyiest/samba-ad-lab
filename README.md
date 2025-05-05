@@ -57,7 +57,7 @@ samba-ad-lab/
 
 Lance les commandes suivantes depuis le dossier `samba-ad-lab` :
 
-### 🌊 Déploiement
+### Déploiement
 
 ```bash
 make up           # Créer les VM
@@ -65,22 +65,18 @@ make test         # Tester la connectivité Ansible
 make provision    # Provisionner le DC + clients
 ```
 
-### 🚩 Réinitialisation / nettoyage
+### Réinitialisation / nettoyage
 
 ```bash
 make destroy      # Supprimer toutes les VMs
 make reset        # Supprimer puis recréer le lab complet
 ```
 
----
-
 ## Contenu du lab
 
 * Le DC Samba est provisionné selon les bonnes pratiques de [samba.org](https://wiki.samba.org/index.php/Setting_up_Samba_as_an_Active_Directory_Domain_Controller).
 * Le client Linux utilise Winbind pour joindre le domaine.
 * Le client Windows est joint automatiquement via WinRM (Vagrant + Ansible).
-
----
 
 ## Remarques importantes
 

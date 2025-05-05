@@ -1,1 +1,1 @@
-{"dependencies":[["minitar",["~> 0.5"]],["vagrant-winrm",["= 0.7.0"]]],"checksum":"c67891d38374d3758004696baa1b43b4baf6a0a57e244bc45e26928b887f324a","vagrant_version":"2.3.7"}
+{"dependencies":[],"checksum":"1cd97bcb68e4612e79111b06aff1736afc63bb9a884847486c1933efd24cba34","vagrant_version":"2.3.7"}
