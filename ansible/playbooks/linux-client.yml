@@ -1,6 +1,6 @@
 ---
 - name: Joindre un client Linux au domaine Samba AD avec Winbind
-  hosts: linux-client
+  hosts: linuxclient
   become: true
 
   vars:
@@ -10,29 +10,15 @@
     ad_dc_ip: "192.168.56.10"
     ad_dc_hostname: "dc1.example.local"
     domain_admin_user: "Administrator"
-    domain_admin_password: "P@ssw0rd123"
-    interface_name: "eth1"  # Adapter si nécessaire
+    domain_admin_password: "Esteban1#"
+    interface_name: "eth1"
 
   tasks:
-    - name: Installer les paquets requis pour Winbind
-      apt:
-        name:
-          - samba
-          - krb5-user
-          - winbind
-          - libnss-winbind
-          - libpam-winbind
-          - libpam-krb5
-        update_cache: true
-        state: present
+    - name: Débloquer resolv.conf en retirant l'attribut immuable si présent
+      command: chattr -i /etc/resolv.conf
+      ignore_errors: yes
 
-    - name: Définir le fichier /etc/hosts
-      lineinfile:
-        path: /etc/hosts
-        line: "{{ ad_dc_ip }} {{ ad_dc_hostname }} dc1"
-        state: present
-
-    - name: Forcer resolv.conf à pointer vers le DC Samba
+    - name: Définir resolv.conf vers le DC Samba
       copy:
         dest: /etc/resolv.conf
         content: |
@@ -40,13 +26,37 @@
           nameserver {{ ad_dc_ip }}
         force: yes
 
+    - name: Préconfigurer les réponses debconf pour krb5-user
+      debconf:
+        name: krb5-config
+        question: "{{ item.question }}"
+        value: "{{ item.value }}"
+        vtype: "{{ item.vtype }}"
+      loop:
+        - { question: "krb5-config/default_realm", value: "{{ domain_realm }}", vtype: "string" }
+        - { question: "krb5-config/kerberos_servers", value: "{{ ad_dc_hostname }}", vtype: "string" }
+        - { question: "krb5-config/admin_server", value: "{{ ad_dc_hostname }}", vtype: "string" }
+
+    - name: Installer les paquets requis sans interaction
+      command: >
+        apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
+        samba krb5-user winbind libnss-winbind libpam-winbind libpam-krb5 chrony
+      args:
+        warn: false
+
+    - name: Définir le fichier /etc/hosts
+      lineinfile:
+        path: /etc/hosts
+        line: "{{ ad_dc_ip }} {{ ad_dc_hostname }} dc1"
+        state: present
+
     - name: Créer le fichier /etc/krb5.conf
       copy:
         dest: /etc/krb5.conf
         content: |
           [libdefaults]
               default_realm = {{ domain_realm }}
-              dns_lookup_realm = false
+              dns_lookup_realm = true
               dns_lookup_kdc = true
 
           [realms]
@@ -68,8 +78,7 @@
               workgroup = {{ netbios_name }}
               security = ADS
               realm = {{ domain_realm }}
-
-              winbind use default domain = true
+              winbind use default domain = yes
               winbind enum users = yes
               winbind enum groups = yes
               winbind refresh tickets = yes
@@ -92,11 +101,18 @@
         regexp: '^group:'
         line: 'group:          compat winbind'
 
+    - name: Vérifier la connectivité Kerberos avec kinit
+      shell: echo '{{ domain_admin_password }}' | kinit {{ domain_admin_user }}
+      register: kinit_result
+      failed_when: kinit_result.rc != 0
+      ignore_errors: no
+
     - name: Joindre le domaine avec net ads join
-      shell: |
-        echo '{{ domain_admin_password }}' | net ads join -U {{ domain_admin_user }}%{{ domain_admin_password }}
+      shell: echo '{{ domain_admin_password }}' | net ads join -U {{ domain_admin_user }}%{{ domain_admin_password }}
       args:
         creates: /etc/samba/joined
+      register: join_result
+      failed_when: "'Failed to join domain' in join_result.stdout or join_result.rc != 0"
 
     - name: Créer un fichier témoin pour éviter les doubles joins
       file:

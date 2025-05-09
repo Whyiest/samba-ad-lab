@@ -34,9 +34,9 @@ Vagrant.configure("2") do |config|
     end
   end
 
-  # Client Windows
+  # Client Windows (OPTION POSSIBLE WINDOWS 11 gusztavvargadr/windows-11)
   config.vm.define "windows-client" do |win|
-    # Remplace par une box Windows valide selon ton système
+    # Box Windows connue mais parfois instable
     win.vm.box = "gusztavvargadr/windows-10"
     win.vm.hostname = "windows-client"
     win.vm.network "private_network", ip: "192.168.56.12"
@@ -44,6 +44,7 @@ Vagrant.configure("2") do |config|
     win.vm.communicator = "winrm"
     win.winrm.username = "vagrant"
     win.winrm.password = "vagrant"
+    win.winrm.transport = "basic"
     win.vm.provider "virtualbox" do |vb|
       vb.memory = 4096
       vb.cpus = 2

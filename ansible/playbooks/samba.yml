@@ -1,6 +1,7 @@
----
+# SAMBA Active Directory Domain Controller Setup Playbook
+
 - name: Installation d'un Contrôleur de Domaine Active Directory avec Samba
-  hosts: dc
+  hosts: dcs
   become: true
 
   vars:
@@ -8,13 +9,24 @@
     domain_realm: "EXAMPLE.LOCAL"
     netbios_name: "EXAMPLE"
     samba_domain: "example.local"
-    samba_admin_password: "P@ssw0rd123"
-    interface_name: "eth1"  # Adapter selon Vagrant
+    samba_admin_password: "Esteban1#"
     dns_forwarder: "8.8.8.8"
+    internal_interface: "enp0s8"
 
   tasks:
+    - name: Débloquer resolv.conf et configurer Google DNS immédiatement
+      block:
+        - name: Débloquer resolv.conf
+          command: chattr -i /etc/resolv.conf
+          ignore_errors: true
 
-    - name: Mise à jour du système et installation des paquets requis
+        - name: Appliquer Google DNS dans resolv.conf
+          copy:
+            dest: /etc/resolv.conf
+            content: |
+              nameserver 8.8.8.8
+
+    - name: Mise à jour système et installation des paquets nécessaires
       apt:
         name:
           - samba
@@ -26,36 +38,38 @@
           - libpam-krb5
           - acl
           - attr
-        update_cache: true
+          - chrony
+        update_cache: yes
+        cache_valid_time: 3600
         state: present
 
-    - name: Définir le hostname FQDN
+    - name: Définir le hostname
       hostname:
         name: "{{ hostname_fqdn }}"
 
-    - name: Ajouter au fichier /etc/hosts
+    - name: Ajouter l'entrée /etc/hosts
       lineinfile:
         path: /etc/hosts
-        line: "192.168.56.10 {{ hostname_fqdn }} dc1"
-        state: present
+        line: "127.0.1.1 {{ hostname_fqdn }} dc1"
 
-    - name: Arrêter les services Samba préexistants
-      service:
+    - name: Arrêter les services Samba classiques
+      systemd:
         name: "{{ item }}"
         state: stopped
+        enabled: no
       loop:
         - smbd
         - nmbd
         - winbind
-      ignore_errors: yes
+      ignore_errors: true
 
-    - name: Renommer l'ancien smb.conf s'il existe
+    - name: Sauvegarder l'ancien smb.conf s'il existe
       command: mv /etc/samba/smb.conf /etc/samba/smb.conf.old
       args:
         removes: /etc/samba/smb.conf
-      ignore_errors: yes
+      ignore_errors: true
 
-    - name: Provisionner le domaine Active Directory Samba
+    - name: Provisionner le domaine Active Directory
       command: >
         samba-tool domain provision
         --use-rfc2307
@@ -64,69 +78,216 @@
         --server-role=dc
         --dns-backend=SAMBA_INTERNAL
         --adminpass={{ samba_admin_password }}
+        --dns-forwarder={{ dns_forwarder }}
       args:
         creates: /var/lib/samba/private/sam.ldb
 
-    - name: Désactiver systemd-resolved si actif
-      service:
+    - name: Désactiver systemd-resolved
+      systemd:
         name: systemd-resolved
         state: stopped
         enabled: no
-      ignore_errors: yes
+      ignore_errors: true
 
-    - name: Forcer /etc/resolv.conf pour pointer vers 127.0.0.1
+    - name: Générer un krb5.conf personnalisé
+      copy:
+        dest: /etc/krb5.conf
+        content: |
+          [libdefaults]
+              default_realm = {{ domain_realm }}
+              dns_lookup_realm = false
+              dns_lookup_kdc = true
+
+          [realms]
+              {{ domain_realm }} = {
+                  kdc = {{ hostname_fqdn }}
+                  admin_server = {{ hostname_fqdn }}
+                  default_domain = {{ samba_domain }}
+              }
+
+          [domain_realm]
+              .{{ samba_domain }} = {{ domain_realm }}
+              {{ samba_domain }} = {{ domain_realm }}
+              {{ hostname_fqdn }} = {{ domain_realm }}
+
+
+    - name: Configurer Chrony pour NTP
+      block:
+        - name: Configurer les serveurs NTP
+          lineinfile:
+            path: /etc/chrony/chrony.conf
+            regexp: '^server'
+            line: "server {{ item }} iburst"
+            insertafter: BOF
+          loop:
+            - 0.pool.ntp.org
+            - 1.pool.ntp.org
+
+        - name: Autoriser le réseau local
+          lineinfile:
+            path: /etc/chrony/chrony.conf
+            regexp: '^allow'
+            line: "allow 192.168.0.0/16"
+            insertafter: EOF
+
+        - name: Redémarrer Chrony
+          systemd:
+            name: chrony
+            state: restarted
+            enabled: yes
+
+    - name: Configurer resolv.conf pour Samba
       copy:
         dest: /etc/resolv.conf
         content: |
           search {{ samba_domain }}
-          nameserver 127.0.0.1
-      force: yes
+          nameserver 8.8.8.8
 
     - name: Rendre resolv.conf immuable
       command: chattr +i /etc/resolv.conf
-      args:
-        warn: false
-      ignore_errors: yes
+      ignore_errors: true
 
-    - name: Remplacer krb5.conf avec le fichier Samba généré
+    - name: Forcer la génération du smb.conf
       copy:
-        src: /var/lib/samba/private/krb5.conf
-        dest: /etc/krb5.conf
-        remote_src: yes
-        force: yes
+        dest: /etc/samba/smb.conf
+        content: |
+          [global]
+              netbios name = {{ hostname_fqdn.split('.')[0]|upper }}
+              realm = {{ domain_realm }}
+              workgroup = {{ netbios_name }}
+              server role = active directory domain controller
+              idmap_ldb:use rfc2307 = yes
+              dns forwarder = {{ dns_forwarder }}
+              ldap server require strong auth = no
+              bind interfaces only = yes
+              interfaces = lo {{ internal_interface }} 127.0.0.1              allow dns updates = nonsecure and secure
 
-    - name: Activer NTP via Chrony
-      apt:
-        name: chrony
-        state: present
+          [sysvol]
+              path = /var/lib/samba/sysvol
+              read only = no
 
-    - name: Configurer chrony.conf
-      blockinfile:
-        path: /etc/chrony/chrony.conf
-        marker: "# {mark} ANSIBLE MANAGED BLOCK"
-        block: |
-          server 0.pool.ntp.org iburst
-          server 1.pool.ntp.org iburst
-          allow 192.168.0.0/16
+          [netlogon]
+              path = /var/lib/samba/sysvol/{{ samba_domain }}/scripts
+              read only = no
 
-    - name: Redémarrer Chrony
-      service:
-        name: chrony
-        state: restarted
-        enabled: yes
+    - name: Redémarrer samba-ad-dc avec sudo
+      ansible.builtin.shell: sudo systemctl restart samba-ad-dc
+      register: restart_samba_result
+      changed_when: "'Failed' not in restart_samba_result.stderr"
+      ignore_errors: false
 
-    - name: Démasquer et activer samba-ad-dc
+
+    - name: S'assurer que le forwarder DNS est défini dans smb.conf
+      lineinfile:
+        path: /etc/samba/smb.conf
+        regexp: '^\s*dns forwarder\s*='
+        line: '    dns forwarder = {{ dns_forwarder }}'
+        insertafter: '^\[global\]'
+      notify: Restart Samba
+
+    - name: Appliquer le forwarder DNS dans la base DNS interne
+      command: samba-tool dns forwarder {{ hostname_fqdn }} {{ dns_forwarder }}
+      register: set_dns_forwarder
+      failed_when: false
+      changed_when: "'Forwarder added successfully' in set_dns_forwarder.stdout"
+
+    - name: Activer et démarrer samba-ad-dc
       systemd:
         name: samba-ad-dc
-        enabled: yes
         state: started
+        enabled: yes
         masked: no
 
-    - name: Test de connectivité avec smbclient (facultatif)
+    - name: Tester les partages Samba
       shell: smbclient -L localhost -N
       register: smbclient_result
-      ignore_errors: yes
+      ignore_errors: true
 
-    - name: Afficher résultat smbclient
+    - name: Afficher les partages Samba
       debug:
         var: smbclient_result.stdout_lines
+
+    - name: Tester la résolution DNS _ldap._tcp
+      shell: host -t SRV _ldap._tcp.{{ samba_domain }} 127.0.0.1
+      register: ldap_dns_test
+      ignore_errors: true
+
+    - name: Afficher le résultat DNS _ldap._tcp
+      debug:
+        var: ldap_dns_test.stdout_lines
+
+    - name: Tester la résolution DNS _kerberos._udp
+      shell: host -t SRV _kerberos._udp.{{ samba_domain }} 127.0.0.1
+      register: kerberos_dns_test
+      ignore_errors: true
+
+    - name: Afficher le résultat DNS _kerberos._udp
+      debug:
+        var: kerberos_dns_test.stdout_lines
+
+    - name: Tester la résolution DNS du DC
+      shell: host -t A {{ hostname_fqdn }} 127.0.0.1
+      register: a_record_test
+      ignore_errors: true
+
+    - name: Afficher le résultat DNS A record
+      debug:
+        var: a_record_test.stdout_lines
+
+    - name: Tester l'obtention d'un ticket Kerberos
+      shell: echo '{{ samba_admin_password }}' | kinit administrator@{{ domain_realm }}
+      register: kinit_result
+      ignore_errors: true
+
+    - name: Vérifier les tickets Kerberos
+      shell: klist
+      register: klist_result
+      ignore_errors: true
+
+    - name: Afficher les tickets Kerberos
+      debug:
+        var: klist_result.stdout_lines
+
+
+    - name: Vérifier les rôles FSMO
+      shell: samba-tool fsmo show
+      register: fsmo_roles
+      ignore_errors: true
+
+    - name: Afficher les rôles FSMO
+      debug:
+        var: fsmo_roles.stdout_lines
+
+    - name: Lister les utilisateurs du domaine
+      shell: samba-tool user list
+      register: samba_user_list
+      ignore_errors: true
+
+    - name: Afficher les utilisateurs du domaine
+      debug:
+        var: samba_user_list.stdout_lines
+
+    - name: Vérifier les informations du domaine
+      shell: samba-tool domain info 127.0.0.1
+      register: samba_domain_info
+      ignore_errors: true
+
+    - name: Afficher les informations du domaine
+      debug:
+        var: samba_domain_info.stdout_lines
+
+    - name: Tester la réplication DRS avec authentification
+      shell: echo '{{ samba_admin_password }}' | samba-tool drs showrepl -U Administrator
+      register: samba_drs_status
+      ignore_errors: true
+
+    - name: Afficher le résultat de la réplication DRS
+      debug:
+        var: samba_drs_status.stdout_lines
+
+
+  handlers:
+    - name: Restart Samba
+      systemd:
+        name: samba-ad-dc
+        state: restarted
